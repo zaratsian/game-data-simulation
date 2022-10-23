@@ -1,23 +1,23 @@
 '''
 Simulation Objectives/Outcomes:
 - Themes should emerge for "simPlayerType" in any analysis / ML
+- Churn can be predicted based on "disengagement" lead time
 - Some players are more likely to buy and/or more likely to pay for high dollar items.
 '''
 
 import json
 import time, datetime
 import random
-import numpy as np, numpy.random
 
 class playerEvent:
     def __init__(self, username, userid):
-        self.EventId = f'{int(time.time())}{random.randint(10000,99999)}'
+        self.eventId = f'{int(time.time())}{random.randint(10000,99999)}'
+        self.numberSessions = 0
         self.userid = userid
         self.username = username
         self.points = 0
-        self.itemPayload = {'itemID':'', 'itemName':""}
-        self.itemPrice = 0
-        self.itemPayloadName = ""
+        self.totalTransactionAmount = 0.0
+        self.itemsPurchased = 0
         self.visitsToStore = 0
         self.minutesPlayed = 0
         self.gameType = ""
@@ -25,16 +25,12 @@ class playerEvent:
         self.offensePercent = 0.0
         self.defensePercent = 0.0
         self.timeWithBall = 0.0
-        self.scoredGoal = False
-        self.scoredOn = False
-        self.fieldPosition_DefendingLeftSidePct  = 0.0
-        self.fieldPosition_DefendingRightSidePct = 0.0
-        self.fieldPosition_AttackingLeftSidePct  = 0.0
-        self.fieldPosition_AttackingRightSidePct = 0.0
         self.soccerPosition = random.choice(['goalie']*5 + ['defender']*25 + ['midfielder']*25 + ['forward']*45)
-        self.simPlayerType = random.choice(['competitive']*10 + ['weekender']*30 + ['afterschool']*40 + ['casual']*20)
         self.platform = random.choice(['pc']*20 + ['mobile']*20 + ['nintendo switch']*20 + ['ps4']*5 + ['xbox']*20)
+        self.simPlayerType = random.choice(['competitive']*10 + ['weekender']*30 + ['afterschool']*40 + ['casual']*20)
         self.simEventsToChurnCount = 0
+        self.simPlayerDisengaged = False
+        self.simPlayerDisengagedLeadTime = 0
         
         if self.simPlayerType == 'competitive':
             '''
@@ -49,7 +45,7 @@ class playerEvent:
             '''
             self.datetimepy = datetime.datetime.strptime('2020-01-01','%Y-%m-%d') + datetime.timedelta(minutes=random.randint(1,21600))
             self.simEventsToChurn = random.triangular(712,903,900)
-            self.simChurnDate = self.datetimepy + datetime.timedelta(days=random.triangular(712,903,900))
+            self.simPlayerDisengagedLeadTime = random.randint(1,3)
             self.simPurchaseFreq = random.randint(23,27)/100
         elif self.simPlayerType == 'weekender':
             '''
@@ -64,7 +60,7 @@ class playerEvent:
             '''
             self.datetimepy = self.getNextWeekend(datetime.datetime.strptime('2020-01-01','%Y-%m-%d') + datetime.timedelta(minutes=random.randint(1,14400)))
             self.simEventsToChurn = random.triangular(75,500,365)
-            self.simChurnDate = self.datetimepy + datetime.timedelta(days=random.triangular(75,500,365))
+            self.simPlayerDisengagedLeadTime = random.randint(30,40)
             self.simPurchaseFreq = random.randint(35,42)/100
         elif self.simPlayerType == 'afterschool':
             '''
@@ -79,7 +75,7 @@ class playerEvent:
             '''
             self.datetimepy = self.getNextWeekday(datetime.datetime.strptime('2020-01-01','%Y-%m-%d') + datetime.timedelta(minutes=random.randint(1,21600)))
             self.simEventsToChurn = random.triangular(10,200,30)
-            self.simChurnDate = self.datetimepy + datetime.timedelta(days=random.triangular(10,200,30))
+            self.simPlayerDisengagedLeadTime = random.randint(14,21)
             self.simPurchaseFreq = random.randint(45,65)/100
         elif self.simPlayerType == 'casual':
             '''
@@ -94,9 +90,10 @@ class playerEvent:
             '''
             self.datetimepy = datetime.datetime.strptime('2020-01-01','%Y-%m-%d') + datetime.timedelta(minutes=random.randint(1,21600))
             self.simEventsToChurn = random.triangular(30,500,180)
-            self.simChurnDate = self.datetimepy + datetime.timedelta(days=random.triangular(30,500,180))
+            self.simPlayerDisengagedLeadTime = random.randint(5,60)
             self.simPurchaseFreq = random.randint(12,17)/100
         
+        self.simEventsUntilDisengaged = self.simEventsToChurn - self.simPlayerDisengagedLeadTime
         self.datetime = self.datetimepy.strftime('%Y-%m-%d %H:%M:%S')
         print(f'[ INFO ] User {self.username} initialized. simPlayerType: {self.simPlayerType}')
     
@@ -135,28 +132,20 @@ class playerEvent:
             [{'itemID':1500, 'itemName': 'Soccer Ball'}]*3
         return random.choice(items)
     
-    def newEvent(self):
-        self.EventId = f'{int(time.time())}{random.randint(1000,9999)}'
+    def newEvent(self):        
+        self.eventId = f'{int(time.time())}{random.randint(1000,9999)}'
         #self.points = random.randint(1,100)
         self.newFriends = int(random.gammavariate(1,1))
         self.simEventsToChurnCount += 0
+        self.simEventsUntilDisengaged -= 1
         self.soccerPosition = random.choice(['goalie']*5 + ['defender']*25 + ['midfielder']*25 + ['forward']*45)
         
         if self.soccerPosition in ['goalie','defender']:
             self.defensePercent = random.triangular(1,99,80) / 100
             self.offensePercent = 1.0 - self.defensePercent
-            self.scoredGoal = random.choice([False]*98 + [True]*2)
-            self.scoredOn   = random.choice([False]*80 + [True]*20)
         else:
             self.offensePercent = random.triangular(1,99,80) / 100
             self.defensePercent = 1.0 - self.offensePercent
-            self.scoredGoal = random.choice([False]*75 + [True]*25)
-            self.scoredOn   = random.choice([False]*95 + [True]*5)
-        
-        self.fieldPosition_DefendingLeftSidePct  = self.defensePercent * random.random()
-        self.fieldPosition_DefendingRightSidePct = (1-(self.fieldPosition_DefendingLeftSidePct / self.defensePercent)) * self.defensePercent
-        self.fieldPosition_AttackingLeftSidePct  = self.offensePercent * random.random()
-        self.fieldPosition_AttackingRightSidePct = (1-(self.fieldPosition_AttackingLeftSidePct / self.offensePercent)) * self.offensePercent
         
         if self.offensePercent > self.defensePercent:
             self.timeWithBall = random.triangular(1,99,85) / 100
@@ -164,57 +153,67 @@ class playerEvent:
             self.timeWithBall = random.triangular(1,99,35) / 100            
         
         if self.simPlayerType == 'competitive':
-            self.datetimepy = self.datetimepy + datetime.timedelta(hours=random.randint(1,3))
+            self.numberSessions = int(random.triangular(1,15,6))
+            self.datetimepy = self.datetimepy + datetime.timedelta(days= int(random.choice([1]*9 + [2]*1)) )
             self.datetime = self.datetimepy.strftime('%Y-%m-%d %H:%M:%S')
             self.points = random.randint(1,100)
             self.minutesPlayed = random.triangular(120,480,180)
-            self.itemPrice = random.randint(25,100) if self.simPurchaseFreq >= random.random() else 0
-            self.itemPayload = self.getItem() if self.itemPrice != 0 else {'itemID':'', 'itemName':""}
-            self.visitsToStore = int(random.choice([0]*85 + [1]*12 + [2]*3)) if self.itemPrice == 0 else random.randint(1,3)
+            self.totalTransactionAmount = random.randint(25,100) if self.simPurchaseFreq >= random.random() else 0
+            self.itemsPurchased = int(random.choice([1]*85 + [2]*12 + [3]*3 + [4]*0 + [5]*0 + [6]*0 + [7]*0)) if self.totalTransactionAmount != 0 else 0
+            self.visitsToStore = int(random.choice([0]*85 + [1]*12 + [2]*3)) if self.itemsPurchased == 0 else random.randint(1,3)
             self.gameType = random.choice(['tournament']*80 + ['skills game']*20)
             self.platform = random.choice(['pc']*90 + ['mobile']*0 + ['nintendo switch']*0 + ['ps4']*5 + ['xbox']*5)
         elif self.simPlayerType == 'weekender':
-            self.datetimepy = self.getNextWeekend( self.datetimepy + datetime.timedelta(hours=random.randint(1,8)) )
+            self.numberSessions = int(random.triangular(1,10,5))
+            self.datetimepy = self.getNextWeekend( self.datetimepy + datetime.timedelta(days= int(random.choice([1]*10 + [2]*0)) ) )
             self.datetime = self.datetimepy.strftime('%Y-%m-%d %H:%M:%S')
             self.points = int(random.triangular(1,100,75))
             self.minutesPlayed = random.triangular(15,240,120)
-            self.itemPrice = random.randint(0,50) if self.simPurchaseFreq >= random.random() else 0
-            self.itemPayload = self.getItem() if self.itemPrice != 0 else {'itemID':'', 'itemName':""}
-            self.visitsToStore = int(random.gammavariate(2,1)) if self.itemPrice == 0 else random.randint(1,4)
+            self.totalTransactionAmount = random.randint(0,50) if self.simPurchaseFreq >= random.random() else 0
+            self.itemsPurchased = int(random.choice([1]*65 + [2]*20 + [3]*5 + [4]*5 + [5]*3 + [6]*2 + [7]*0)) if self.totalTransactionAmount != 0 else 0
+            self.visitsToStore = int(random.gammavariate(2,1)) if self.itemsPurchased == 0 else random.randint(1,4)
             self.gameType = random.choice(['tournament']*5 + ['play for rewards']*55 + ['match with friends']*40)
             self.platform = random.choice(['pc']*5 + ['mobile']*0 + ['nintendo switch']*0 + ['ps4']*40 + ['xbox']*55)
         elif self.simPlayerType == 'afterschool':
-            self.datetimepy = self.getNextWeekday( self.datetimepy + datetime.timedelta(hours=random.randint(1,24)) )
+            self.numberSessions = int(random.triangular(1,10,3))
+            self.datetimepy = self.getNextWeekday( self.datetimepy + datetime.timedelta(days= int(random.choice([1]*9 + [2]*1)) ) )
             self.datetime = self.datetimepy.strftime('%Y-%m-%d %H:%M:%S')
             self.points = int(random.triangular(1,65,5))
             self.minutesPlayed = random.triangular(5,180,30)
-            self.itemPrice = random.randint(0,100) if self.simPurchaseFreq >= random.random() else 0
-            self.itemPayload = self.getItem() if self.itemPrice != 0 else {'itemID':'', 'itemName':""}
-            self.visitsToStore = int(random.gammavariate(3,1)) if self.itemPrice == 0 else random.randint(1,5)
+            self.totalTransactionAmount = random.randint(0,100) if self.simPurchaseFreq >= random.random() else 0
+            self.itemsPurchased = int(random.choice([1]*58 + [2]*20 + [3]*10 + [4]*5 + [5]*3 + [6]*2 + [7]*2)) if self.totalTransactionAmount != 0 else 0
+            self.visitsToStore = int(random.gammavariate(3,1)) if self.itemsPurchased == 0 else random.randint(1,5)
             self.gameType = random.choice(['match with friends']*75 + ['skills game']*10 + ['play for rewards']*10 + ['single match']*5)
             self.platform = random.choice(['pc']*5 + ['mobile']*5 + ['nintendo switch']*15 + ['ps4']*45 + ['xbox']*30)
         elif self.simPlayerType == 'casual':
-            self.datetimepy = self.datetimepy + datetime.timedelta(hours=random.randint(1,72))
+            self.numberSessions = int(random.triangular(1,8,1))
+            self.datetimepy = self.datetimepy + datetime.timedelta(days= int(random.choice([1]*55 + [2]*25 + [3]*10 + [4]*7 + [5]*2)) )
             self.datetime = self.datetimepy.strftime('%Y-%m-%d %H:%M:%S')
             self.points = int(random.triangular(1,82,40))
             self.minutesPlayed = random.triangular(5,90,15)
-            self.itemPrice = random.randint(0,10) if self.simPurchaseFreq >= random.random() else 0
-            self.itemPayload = self.getItem() if self.itemPrice != 0 else {'itemID':'', 'itemName':""}
-            self.visitsToStore = int(random.gammavariate(1,1)) if self.itemPrice == 0 else random.randint(1,3)
+            self.totalTransactionAmount = random.randint(0,10) if self.simPurchaseFreq >= random.random() else 0
+            self.itemsPurchased = int(random.choice([1]*90 + [2]*8 + [3]*2 + [4]*0 + [5]*0 + [6]*0 + [7]*0)) if self.totalTransactionAmount != 0 else 0
+            self.visitsToStore = int(random.gammavariate(1,1)) if self.itemsPurchased == 0 else random.randint(1,3)
             self.gameType = random.choice(['single match']*10 + ['play for rewards']*25 + ['skills game']*70)
             self.platform = random.choice(['pc']*0 + ['mobile']*80 + ['nintendo switch']*10 + ['ps4']*5 + ['xbox']*5)
+        
+        if self.simEventsUntilDisengaged <= 0:
+            self.points = random.randint(1,20)
+            self.minutesPlayed = random.randint(5,30)
+            self.totalTransactionAmount = 0
+            self.itemsPurchased = 0
     
     def getEventData(self):
         if (self.simEventsToChurnCount <= self.simEventsToChurnCount) and (self.datetimepy <= datetime.datetime.now()):
             payload = {
-                'EventId': self.EventId,
+                'eventId': self.eventId,
                 'userid': self.userid,
                 'username': self.username,
                 'datetime': self.datetime,
+                'numberSessions': self.numberSessions,
                 'points': self.points,
-                'itemID': self.itemPayload['itemID'],
-                'itemName': self.itemPayload['itemName'],
-                'itemPrice': self.itemPrice,
+                'totalTransactionAmount': self.totalTransactionAmount,
+                'itemsPurchased': self.itemsPurchased,
                 'visitsToStore': self.visitsToStore,
                 'minutesPlayed': self.minutesPlayed,
                 'gameType': self.gameType,
@@ -222,19 +221,13 @@ class playerEvent:
                 'offensePercentage': self.offensePercent,
                 'defensePercentage': self.defensePercent,
                 'timeWithBall': self.timeWithBall,
-                'scoredGoal': self.scoredGoal,
-                'scoredOn': self.scoredOn,
-                'fieldPosition_DefendingLeftSidePct': self.fieldPosition_DefendingLeftSidePct,
-                'fieldPosition_DefendingRightSidePct': self.fieldPosition_DefendingRightSidePct,
-                'fieldPosition_AttackingLeftSidePct': self.fieldPosition_AttackingLeftSidePct,
-                'fieldPosition_AttackingRightSidePct': self.fieldPosition_AttackingRightSidePct,
                 #'soccerPosition': self.soccerPosition,
                 'platform': self.platform,
             }
             return payload
         else:
-            if (self.datetimepy >= self.simChurnDate):
-                print(f'[ INFO ] Simulation complete for {self.username}. Player has churned on {self.datetime}, churn date of {self.simChurnDate}')
+            if (self.simEventsToChurnCount > self.simEventsToChurnCount):
+                print(f'[ INFO ] Simulation complete for {self.username}. Player has churned on {self.datetime}')
             elif (self.datetimepy > datetime.datetime.now()):
                 print(f'[ INFO ] Simulation complete for {self.username}. Datetime ({self.datetimepy}) is equal to today.')
             return None
@@ -307,8 +300,8 @@ def saveToSpanner(instance_id, database_id, table_id, schema, recordList):
 if __name__ == "__main__":
     
     bucket_name = 'udp-data-assets'
-    filename    = 'gameEventsIntra.json'
-    bqTableName = 'gameEventsIntra'
+    filename    = 'gameEventsDaily_v2.json'
+    bqTableName = 'gameEventsDaily_v2'
     
     playerNamesList = '''020e1d45-85ec-4d51-ab84-e22de8ef6c42|Grace|Nash|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
     0242fd56-47bd-49c0-ad96-73538360238e|Harper|Ayers|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
@@ -432,7 +425,7 @@ if __name__ == "__main__":
                 output.append(playerPayload)
     
     print(f'[ INFO ] Total Records: {len(output)}')
-    newOutput = sorted(output, key=lambda d: d['datetime']) 
+    newOutput = sorted(output, key=lambda d: d['datetime'])
     
     newLineDelmitedJSON = ''
     for line in newOutput:
