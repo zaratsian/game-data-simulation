@@ -1,13 +1,30 @@
 '''
 Simulation Objectives/Outcomes:
-- Themes should emerge for "simPlayerType" in any analysis / ML
-- Churn can be predicted based on "disengagement" lead time
+- 4 player types/clusters should emerge based on "simPlayerType" (tournament player, casual, after-school, and weekender)
+- Churn can be predicted based on "disengagement" lead time (which can range from a few days to a few weeks)
 - Some players are more likely to buy and/or more likely to pay for high dollar items.
+
+USAGE:
+# Save as local JSON file
+sim-events-daily.py --dataLocation local --localFilename simulatedData.json
+
+# Save to Google Cloud Storage
+sim-events-daily.py --dataLocation cloudstorage --gcpProjectId lunar-data-364510 --gcp_bucket_name udp-lunar-data-364510-datasets --gcp_object_name simulatedDataGCS.json
+
+# Stream data into Google BigQuery
+sim-events-daily.py --dataLocation bigquerystream --gcpProjectId lunar-data-364510 --bigquery_dataset udp --bigquery_tablename testTable
+
+# Real-time stream into PubSub
+sim-events-daily.py --dataLocation pubsub --gcpProjectId lunar-data-364510 --pubsub_topic gameTelemetryTopic
 '''
 
+import sys
 import json
 import time, datetime
 import random
+import argparse
+import config
+from google.cloud import pubsub_v1
 
 class playerEvent:
     def __init__(self, username, userid):
@@ -95,7 +112,7 @@ class playerEvent:
         
         self.simEventsUntilDisengaged = self.simEventsToChurn - self.simPlayerDisengagedLeadTime
         self.datetime = self.datetimepy.strftime('%Y-%m-%d %H:%M:%S')
-        print(f'[ INFO ] User {self.username} initialized. simPlayerType: {self.simPlayerType}')
+        print(f'[ INFO ] Player {self.username} joined the game. Player persona: {self.simPlayerType}')
     
     def getNextWeekend(self, currentDatetime):
         nextDay = currentDatetime + datetime.timedelta(days=1)
@@ -233,6 +250,16 @@ class playerEvent:
             return None
 
 
+def saveToLocal(outputFilename, dataContent):
+    try:
+        f = open(outputFilename, 'w')
+        f.write(dataContent)
+        f.close()
+        print(f'[ INFO ] Saved data to local file {outputFilename}.')
+    except Exception as e:
+        print(f'[ EXCEPTION ] At saveToLocal. {e}')
+
+
 def saveFileToCloudStorage(bucket_name, blob_name, source_file_name):
     from google.cloud import storage
     storage_client = storage.Client()
@@ -251,11 +278,21 @@ def saveObjectToCloudStorage(bucket_name, blob_name, data):
     print(f'[ INFO ] In memory data uploaded to {bucket_name} as {blob_name}')
 
 
+def push_to_pubsub(pubsub_publisher, project_id, pubsub_topic, json_paylod):
+    topic_path = pubsub_publisher.topic_path(project_id, pubsub_topic)
+    # Data must be a bytestring
+    data = json.dumps(json_paylod).encode('utf-8')
+    
+    future = pubsub_publisher.publish(topic_path, data)
+    print(future.result())
+    print(f"Published message to {topic_path}.")
+
+
 def saveToBigQuery(gcpProjectID, bqDataset, bqTable, rows_to_insert):
     '''
         BigQuery Streaming Insert
         NOTE: Streaming insert cost extra.
-
+        
         rows_to_insert = [
             {"full_name": "Phred Phlyntstone", "age": 32},
             {"full_name": "Wylma Phlyntstone", "age": 29},
@@ -266,9 +303,21 @@ def saveToBigQuery(gcpProjectID, bqDataset, bqTable, rows_to_insert):
     table_id = f'{gcpProjectID}.{bqDataset}.{bqTable}'
     errors = bigquery_client.insert_rows_json(table_id, rows_to_insert)
     if errors == []:
-        print(f'New rows have been added.')
+        print(f'[ INFO ] {len(rows_to_insert)} new rows have been added.')
     else:
         print(f'[ WARNING ] Encountered errors while inserting rows: {errors}')
+
+
+def createBQTable(gcpProjectID, bqDataset, bqTable, schema):
+    try:
+        from google.cloud import bigquery
+        bigquery_client = bigquery.Client()
+        table_id = f'{gcpProjectID}.{bqDataset}.{bqTable}'
+        table = bigquery.Table(table_id, schema=schema)
+        table = bigquery_client.create_table(table)
+        print("[ INFO ] Created table {}.{}.{}".format(table.project, table.dataset_id, table.table_id))
+    except Exception as e:
+        print(f'[ EXCEPTION ] At createBQTable. {e}')
 
 
 def saveToSpanner(instance_id, database_id, table_id, schema, recordList):
@@ -297,138 +346,107 @@ def saveToSpanner(instance_id, database_id, table_id, schema, recordList):
     return None
 
 
+def streamToPubSub(project_id, pubsub_publisher, pubsub_topic, json_paylod):
+    try:
+        topic_path = pubsub_publisher.topic_path(project_id, pubsub_topic)
+        # Data must be a bytestring
+        data = json.dumps(json_paylod).encode('utf-8')
+        
+        future = pubsub_publisher.publish(topic_path, data)
+        print(future.result())
+        print(f"Published message to {topic_path}.")
+    except Exception as e:
+        print(f'[ EXCEPTION ] At streamToPubSub. {e}')
+
+
 if __name__ == "__main__":
     
-    bucket_name = 'udp-data-assets'
-    filename    = 'gameEventsDaily_v2.json'
-    bqTableName = 'gameEventsDaily_v2'
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--dataLocation',       type=str, required=True,  help='Where should the simulated data be saved: local, cloudstorage, bigquerybatch, bigquerystream, or spanner)')
+    parser.add_argument('--gcpProjectId',       type=str, required=False, help='Google Cloud Project ID')
+    parser.add_argument('--localFilename',      type=str, required=False, help='Name of local file, if dataLocation == "local"')
+    parser.add_argument('--gcp_bucket_name',    type=str, required=False, help='Name of GCS bucket, if dataLocation == "cloudstorage"')
+    parser.add_argument('--gcp_object_name',    type=str, required=False, help='Name of GCS object name, if dataLocation == "cloudstorage"')
+    parser.add_argument('--bigquery_dataset',   type=str, required=False, help='Name of Bigquery Dataset, if dataLocation == "bigquery"')
+    parser.add_argument('--bigquery_tablename', type=str, required=False, help='Name of Bigquery Table, if dataLocation == "bigquery"')
+    parser.add_argument('--pubsub_topic',       type=str, required=False, help='PubSub Topic name, if dataLocation == "pubsub"')
     
-    playerNamesList = '''020e1d45-85ec-4d51-ab84-e22de8ef6c42|Grace|Nash|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    0242fd56-47bd-49c0-ad96-73538360238e|Harper|Ayers|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    060aaf03-3fe8-4c9e-8a81-99b5e6d533d9|Riley|Shea|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    063b46e1-265f-4800-8cc6-a45c675bd202|Madelyn|Rocha|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    066122d5-6e02-40a7-a0a4-18d84bf5a194|Nora|Davis|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    074c0227-4340-4871-b2c1-b496aaed1a42|Gabriella|Marsh|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    0921ab1c-641d-44f9-bef0-b1c12d121970|Aaliyah|Bernard|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    0de6e2ae-a50c-4234-b811-f398b6bab5a2|Evelyn|Yang|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    0e9be25e-56a3-4bc8-a6ae-11d17f8f026e|Arianna|Whitehead|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    11dac5d6-3628-488a-a74c-807d3f8f231b|Elizabeth|Sanchez|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    12f357d0-90f1-43c0-bab4-8de19acf20c2|Natalie|Ayers|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    14cb15f0-dd0c-426b-9321-1dcffc6671a9|Peyton|Mckee|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    1bf72e53-349b-4dca-b2ec-6b7c2888db2e|Peyton|Whitehead|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    2186e846-2964-4728-9a29-c4c186d8d878|Peyton|Travis|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    2408d0ec-ca2a-4f85-8877-15c18ed2e85f|Skylar|Bautista|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    2715294d-1eb1-45b4-8a5d-8f0aff8bcf8f|Natalie|Nunez|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    27c9c7eb-b792-48b7-90e7-8cd8bccef47d|Samantha|Bean|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    29716d16-9cca-4100-9cef-07345060c397|Layla|Patton|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    2996bb04-8f75-4038-a710-eb4e43803baf|Nora|Kirk|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    2b712c49-87c4-4d45-b3a7-1ee47b86dcd1|Leah|Gordon|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    3148530c-16bb-4ea4-b16a-a77cc83a758b|Zoey|Reese|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    33589078-53e4-4e47-8604-5ec20f85f7af|Claire|Bernard|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    34780070-f4ee-4919-86ee-0b5d1c9f11ca|Lucy|Beard|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    36536553-fe39-4f59-89e7-17db8b4d501f|Evelyn|Shepard|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    3aa0005b-52fe-4dd4-8046-566250037e27|Kaylee|Gordon|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    3c91d436-1641-44f2-9be5-04ab4324d071|Natalie|Bernard|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    3cc34729-0a44-460e-9d8f-95b8171c2fd2|Hannah|Nunez|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    3e8e6ba9-e683-49cf-8494-61c76558be13|Nora|Nash|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    41046327-c026-49ff-9b5a-cd1b99d80ce0|Stella|Bean|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    43482d36-d984-4073-8574-43bfa7e947e3|Sofia|Odom|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    466789f8-d5ad-424d-b915-3d7650dd5385|Sofia|Rocha|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    483f277c-3750-4dfc-9970-41af6740799b|Chloe|Reese|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    4a4c7d23-824a-41a2-9afd-899adb73d3a0|Paisley|Bridges|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    4c385ca7-a2c0-40fe-86ae-21ac4edea7dc|Elizabeth|Rocha|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    4df7541d-774e-43db-860c-7fd1dbbd434c|Abigail|Guerrero|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    557914d8-6e9b-4eae-a5fe-6807ebb958d2|Charlotte|Webb|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    55f5bec8-e661-4a3e-8ad4-e82707e7b5ec|Abigail|Hill|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    5862eea3-698b-4c9e-a064-8419d4129c40|Victoria|Webb|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    5a448572-d9ce-434e-ad4b-6eac0444a6c8|Lily|English|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    5df0a3e8-aae6-48e4-95c8-821f026dc964|Leah|Powell|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    5e089345-c89f-4d24-9d4c-3e7fd1396390|Zoe|Nunez|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    5f6c39e6-1963-4a92-a995-cf135396fd4c|Paisley|Mcknight|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    62a04a3a-ffd9-49e0-8f77-5a514a2d5fac|Aaliyah|Cook|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    665d6073-109d-4743-989a-9f96d34b77c2|Zoe|Bean|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    6af4c233-9ec6-4435-8331-763ec44d4f67|Nora|Yang|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    72a5599b-970c-4455-9d0c-53214dc5dff7|Annabelle|Nunez|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    78b456e6-6cc2-4faa-a561-7fd125f2ac8a|Zoe|Cook|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    78d7d390-0dff-4279-9ef0-a3990575410e|Aubrey|Yang|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    7af2c9f6-38b3-4309-a583-2d401a1b2d27|Arianna|Marsh|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    7b8c8bf9-9526-48eb-972e-8de011a139d0|Stella|Powell|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    7be6d007-368e-4642-9af9-822d419f5da9|Chloe|Guerrero|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    7c6e5253-25a7-4ce9-a556-2b3f8d3e13dd|Amelia|Marsh|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    7c73e167-5b81-4e64-b942-5c4d185cc90b|Nevaeh|Cook|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    7f21f04e-f7b6-45f2-8841-830672334434|Madelyn|Goodwin|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    7f8ee50a-11b1-43ae-86e6-ef72a69f2c59|Mia|Whitehead|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    826a6830-ba71-4765-9e2d-a95cd96bd38e|Gabriella|Gordon|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    8f311e9c-11b0-4c54-b51a-52d5e6216089|Alexis|Goodwin|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    92399412-95df-480e-979e-691e93b3097d|Madelyn|Shea|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    958108a6-0ad4-4e68-841d-82141e2e5380|Camila|Nash|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    96fcdc67-93e9-44cf-84b8-9318ec81792c|Peyton|Yang|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    99e3ad3d-a2a8-4917-8913-ec508ba1ffaf|Madelyn|Fry|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    9af8b796-5912-4152-bd4b-194f1ad3d428|Gabriella|Beard|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    9c33abe2-54d1-41cc-911f-11c59f351a82|Elizabeth|Bonilla|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    9d150157-fbc2-4b56-a568-4d3bdd1bc9a7|Emma|Gay|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    9d8bc771-84ee-4158-8efa-1ce9093cfbfe|Annabelle|Powell|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    a227850c-afc3-43cd-9b34-4b84dbd22552|Camila|Mcknight|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    a2f305e4-3372-431d-976c-f0be4aaad132|Caroline|Gentry|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    a311c020-7484-4cf3-a83e-9c5e5e86609c|Camila|Davis|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    a7de03a7-2f5e-455b-9b29-3db0241c090f|Avery|Hill|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    a9eb6b4c-6330-4f15-893c-ff648b9d67f1|Zoe|Gordon|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    ae2450f7-6ecb-4466-b0a5-9e73ab852473|Olivia|Bridges|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    b0d217d9-3744-4bac-a716-e33f4e0648a3|Zoey|Mcknight|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    b2a3f2e6-4342-47e0-ba6d-234c15684d74|Audrey|Hill|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    b7c7160e-9f67-4bc3-910a-f8e389d9e448|Arianna|Merritt|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    b8c51de4-965c-4922-8018-a9a320eaf941|Nevaeh|Robertson|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    c1539142-bb87-43f3-a779-8997a502223f|Harper|Mcknight|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    c3ef1e92-aa30-47db-bb33-e1d7e01a1fc1|Audrey|Bernard|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    c410d6c9-0929-41f5-a00d-2fc83e64890c|Annabelle|Chavez|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    c4dccaf6-6e5d-42f1-b731-b3747fe69023|Samantha|Fry|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    c4feeda7-dbab-4931-92cb-facef6499aae|Gabriella|Gentry|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    c511dc45-9af5-49e4-aeef-881a9bbeae17|Violet|Woodward|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    c79b8487-640f-486e-a236-8f1421450fd3|Arianna|Reese|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    c8a91061-a989-4dc5-b342-4e8869b7de70|Penelope|Cook|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    c9ea70af-1534-49c1-bf2b-1ee9b517d85b|Ariana|Webb|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    cbabc721-3ce0-47b0-b5fb-d298fb924953|Riley|Villa|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    cf0f7865-1348-4938-a760-2b851dfe4796|Chloe|Carr|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    d6d968e2-9826-4fa2-9727-085c904686b2|Charlotte|Mckee|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    d96d4c28-f8b4-4342-946e-46bcff884aa8|Gabriella|Weaver|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    dd5f7e21-c566-4905-a040-dd3b384a3b4c|Sadie|Frost|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    de1157fb-a3a7-4a3a-98b7-8cdf07542b47|Emma|Bautista|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    df312cf1-56b9-4db1-a5c9-0a928b488be0|Riley|Burgess|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    df9f7a45-630c-4c18-9f26-3d005b037a0e|Madison|Guerrero|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    e2d4f890-74b7-46e3-a755-1ea813b3ecd0|Chloe|Vega|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    e3ddb1ba-5601-4e28-b29f-ed75d7c38749|Hailey|Robertson|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    e56e6eba-ea49-42bc-b591-d8219f1728c9|Peyton|Weaver|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    e6d1397e-1869-4117-b771-27f981e36dd4|Ava|Carr|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    e7bf5f0a-be3d-4242-a4a1-46ddd1077f99|Caroline|Yang|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    eeb1ac8d-1e32-4a0c-bf41-80502db013ec|Isabella|Chavez|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    f4ed0c9c-d8ba-40fe-a93d-b99b82d54739|Paisley|Whitehead|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA==
-    fe848b66-2913-4d0b-9d68-0b174697d549|Gabriella|Lloyd|Female|R2Vla3NGb3JHZWVrcyBpcyB0aGUgYmVzdA=='''
-    playerNames = [(p.split('|')[0],f"{p.split('|')[1]} {p.split('|')[2]}") for p in playerNamesList.split('\n')]
+    args = parser.parse_args()
     
-    simulatedPlayerObj = {}
-    output = []
+    if args.dataLocation not in ['local', 'cloudstorage', 'bigquerystream', 'pubsub']:
+        print(f'[ ERROR ] dataLocation argument is not valid. Options include local, cloudstorage, bigquerystream, pubsub')
+        sys.exit()
     
-    for playerID, playerName in playerNames:
-        print()
-        playerPayload = {}
-        if playerName not in simulatedPlayerObj:
-            simulatedPlayerObj[playerName] = playerEvent(playerName, playerID)
-            playerPayload = simulatedPlayerObj[playerName].getEventData()
+    if args.dataLocation == 'pubsub':
+        pubsub_publisher = pubsub_v1.PublisherClient()
         
-        #print(f'[ INFO ] ****** {playerName}. playerPayload: {playerPayload}')
-        counter = 0
-        while playerPayload != None:
-            counter += 1
-            simulatedPlayerObj[playerName].newEvent()
-            playerPayload = simulatedPlayerObj[playerName].getEventData()
-            if playerPayload:
-                output.append(playerPayload)
+        simulatedPlayerObj = {}
+        
+        while True:
+            time.sleep(0.01)
+            
+            # Get random player and simulate data record
+            player = random.choice(config.playerNames)
+            
+            if player['username'] not in simulatedPlayerObj:
+                simulatedPlayerObj[player['username']] = playerEvent(player['username'], player['userid'])
+                playerPayload = simulatedPlayerObj[player['username']].getEventData()
+            else:
+                simulatedPlayerObj[player['username']].newEvent()
+                playerPayload = simulatedPlayerObj[player['username']].getEventData()
+                if playerPayload:
+                    streamToPubSub(project_id=args.gcpProjectId, pubsub_publisher=pubsub_publisher, pubsub_topic=args.pubsub_topic, json_paylod=playerPayload)
+                    print(f"[ INFO ] Simulated user: {player['username']}, playload: playerPayload: {playerPayload}")
     
-    print(f'[ INFO ] Total Records: {len(output)}')
-    newOutput = sorted(output, key=lambda d: d['datetime'])
-    
-    newLineDelmitedJSON = ''
-    for line in newOutput:
-        newLineDelmitedJSON += f'{json.dumps(line)}\n'
-    
-    saveObjectToCloudStorage(bucket_name=bucket_name, blob_name=filename, data=newLineDelmitedJSON)
+    else:
+        simulatedPlayerObj = {}
+        output = []
+        
+        for player in config.playerNames:
+            print()
+            playerPayload = {}
+            if player['username'] not in simulatedPlayerObj:
+                simulatedPlayerObj[player['username']] = playerEvent(player['username'], player['userid'])
+                playerPayload = simulatedPlayerObj[player['username']].getEventData()
+            
+            #print(f'[ INFO ] ****** {player['username']}. playerPayload: {playerPayload}')
+            counter = 0
+            while playerPayload != None:
+                counter += 1
+                simulatedPlayerObj[player['username']].newEvent()
+                playerPayload = simulatedPlayerObj[player['username']].getEventData()
+                if playerPayload:
+                    output.append(playerPayload)
+        
+        print(f'[ INFO ] Total Records: {len(output)}')
+        newOutput = sorted(output, key=lambda d: d['datetime'])
+        
+        newLineDelmitedJSON = ''
+        for line in newOutput:
+            newLineDelmitedJSON += f'{json.dumps(line)}\n'
+        
+        if args.dataLocation == 'cloudstorage':
+            saveObjectToCloudStorage(bucket_name=args.gcp_bucket_name, blob_name=args.gcp_object_name, data=newLineDelmitedJSON)
+        
+        elif args.dataLocation == 'bigquerystream':
+            '''
+            Use BQ Streaing API to load records directly in to BQ
+            '''
+            # Create Table
+            createBQTable(gcpProjectID=args.gcpProjectId, bqDataset=args.bigquery_dataset, bqTable=args.bigquery_tablename, schema=config.bqSchema)
+            
+            # Stream batches of 500 records into BQ
+            bqRecords = []
+            for i, record in enumerate(newOutput):
+                if i % 499 == 0:
+                    bqRecords.append(record)
+                    saveToBigQuery(gcpProjectID=args.gcpProjectId, bqDataset=args.bigquery_dataset, bqTable=args.bigquery_tablename, rows_to_insert=bqRecords)
+                    bqRecords = []
+                else:
+                    bqRecords.append(record)
+            
+            # Send final bqRecord payload
+            saveToBigQuery(gcpProjectID=args.gcpProjectId, bqDataset=args.bigquery_dataset, bqTable=args.bigquery_tablename, rows_to_insert=bqRecords)
+        
+        elif args.dataLocation == 'local':
+            saveToLocal(outputFilename=args.localFilename, dataContent=newLineDelmitedJSON)
